@@ -1,25 +1,156 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Link, useSearchParams } from "react-router-dom";
-import { Eye, EyeOff, ArrowLeft } from "lucide-react";
+import { Link, useSearchParams, useNavigate } from "react-router-dom";
+import { Eye, EyeOff, ArrowLeft, Loader2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
 
 const Auth = () => {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const { toast } = useToast();
   const [isRegister, setIsRegister] = useState(searchParams.get("mode") === "register");
   const [showPassword, setShowPassword] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [formData, setFormData] = useState({
     email: "",
     password: "",
     storeName: "",
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session?.user) {
+        // Check if user has a store
+        checkUserStore(session.user.id);
+      }
+    });
+
+    // Check for existing session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        checkUserStore(session.user.id);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const checkUserStore = async (userId: string) => {
+    const { data: store } = await supabase
+      .from('stores')
+      .select('id')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (store) {
+      navigate('/dashboard');
+    }
+  };
+
+  const generateSlug = (name: string): string => {
+    return name
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Implement auth with Supabase
-    console.log("Form submitted:", formData);
+    setIsLoading(true);
+
+    try {
+      if (isRegister) {
+        // Sign up
+        const { data: authData, error: signUpError } = await supabase.auth.signUp({
+          email: formData.email,
+          password: formData.password,
+          options: {
+            emailRedirectTo: `${window.location.origin}/dashboard`
+          }
+        });
+
+        if (signUpError) {
+          if (signUpError.message.includes('already registered')) {
+            toast({
+              title: "Email já cadastrado",
+              description: "Este email já está em uso. Tente fazer login.",
+              variant: "destructive",
+            });
+          } else {
+            throw signUpError;
+          }
+          return;
+        }
+
+        if (authData.user) {
+          // Create store for the user
+          const slug = generateSlug(formData.storeName);
+          const { error: storeError } = await supabase
+            .from('stores')
+            .insert({
+              user_id: authData.user.id,
+              name: formData.storeName,
+              slug: slug,
+              description: `Bem-vindo ao ${formData.storeName}`,
+            });
+
+          if (storeError) {
+            console.error('Store creation error:', storeError);
+            toast({
+              title: "Erro ao criar loja",
+              description: "Conta criada, mas houve um erro ao criar a loja.",
+              variant: "destructive",
+            });
+          } else {
+            toast({
+              title: "Conta criada com sucesso!",
+              description: "Bem-vindo ao AURY!",
+            });
+            navigate('/dashboard');
+          }
+        }
+      } else {
+        // Sign in
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email: formData.email,
+          password: formData.password,
+        });
+
+        if (signInError) {
+          if (signInError.message.includes('Invalid login credentials')) {
+            toast({
+              title: "Credenciais inválidas",
+              description: "Email ou senha incorretos.",
+              variant: "destructive",
+            });
+          } else {
+            throw signInError;
+          }
+          return;
+        }
+
+        toast({
+          title: "Login realizado!",
+          description: "Bem-vindo de volta!",
+        });
+        navigate('/dashboard');
+      }
+    } catch (error: any) {
+      console.error('Auth error:', error);
+      toast({
+        title: "Erro",
+        description: error.message || "Ocorreu um erro. Tente novamente.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -62,6 +193,8 @@ const Auth = () => {
                   value={formData.storeName}
                   onChange={(e) => setFormData({ ...formData, storeName: e.target.value })}
                   className="h-12"
+                  required
+                  disabled={isLoading}
                 />
               </div>
             )}
@@ -75,6 +208,8 @@ const Auth = () => {
                 value={formData.email}
                 onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                 className="h-12"
+                required
+                disabled={isLoading}
               />
             </div>
 
@@ -88,19 +223,30 @@ const Auth = () => {
                   value={formData.password}
                   onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                   className="h-12 pr-12"
+                  required
+                  minLength={6}
+                  disabled={isLoading}
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
                   className="absolute right-4 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  disabled={isLoading}
                 >
                   {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                 </button>
               </div>
             </div>
 
-            <Button type="submit" size="lg" className="w-full h-12">
-              {isRegister ? "Criar Conta" : "Entrar"}
+            <Button type="submit" size="lg" className="w-full h-12" disabled={isLoading}>
+              {isLoading ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  {isRegister ? "Criando..." : "Entrando..."}
+                </>
+              ) : (
+                isRegister ? "Criar Conta" : "Entrar"
+              )}
             </Button>
           </form>
 
@@ -110,6 +256,7 @@ const Auth = () => {
               <button
                 onClick={() => setIsRegister(!isRegister)}
                 className="text-foreground font-medium hover:underline"
+                disabled={isLoading}
               >
                 {isRegister ? "Entrar" : "Criar conta"}
               </button>
